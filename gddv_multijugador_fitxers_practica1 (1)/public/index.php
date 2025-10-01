@@ -13,12 +13,15 @@ $db_connection = 'sqlite:..\private\users.db';
 
 // fitxer log, per ara no esborrem res
 $log_file = __DIR__ . '/../private/log.txt';
+$attempts_file = __DIR__ . '/../private/attempts.txt';
 date_default_timezone_set('Europe/Madrid');
 
 // regles de password i usernames
 define('PASSWORD_MIN_LEN', 8);
 define('PASSWORD_MAX_LEN', 48);
 define('USERNAME_MAX_LEN', 48);
+define('MAX_ATTEMPTS', 3);
+define('BLOCK_TIME', 90); // 15 minutes
 
 
 // funcions
@@ -31,10 +34,70 @@ function write_log($action, $username = '-'){
     }
 
     $time = date(DATE_RFC2822); //ha de produir sortida com : Wed, 25 Sep 2013 15:28:57 -0700
-
     $line = sprintf("%s\t%s\t%s\n", $time, $action, $username);
-
     @file_put_contents($log_file, $line, FILE_APPEND | LOCK_EX);
+}
+
+function get_client_ip() {
+    return $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+}
+
+function check_attempts($ip) {
+    global $attempts_file;
+    $attempts = [];
+
+    if (file_exists($attempts_file)) {
+        $lines = file($attempts_file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        foreach ($lines as $line) {
+            [$stored_ip, $time, $count] = explode('|', $line);
+            $attempts[$stored_ip] = ['time' => strtotime($time), 'count' => (int)$count];
+        }
+    }
+
+    //if blocked
+    if (isset($attempts[$ip])) {
+        $diff = time() - $attempts[$ip]['time'];
+        if ($attempts[$ip]['count'] >= MAX_ATTEMPTS && $diff < BLOCK_TIME) {
+            return BLOCK_TIME - $diff;
+        }
+    }
+    return 0; //not blocked
+}
+
+function register_attempt($ip, $success) {
+    global $attempts_file;
+    $attempts = [];
+
+    if (file_exists($attempts_file)) {
+        $lines = file($attempts_file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        foreach ($lines as $line) {
+            [$stored_ip, $time, $count] = explode('|', $line);
+            $attempts[$stored_ip] = ['time' => strtotime($time), 'count' => (int)$count];
+        }
+    }
+
+    if ($success) {
+        unset($attempts[$ip]); //reset on success
+    } else {
+        if (!isset($attempts[$ip])) {
+            $attempts[$ip] = ['time' => time(), 'count' => 1];
+        } else {
+            $diff = time() - $attempts[$ip]['time'];
+            if ($diff > BLOCK_TIME) {
+                $attempts[$ip] = ['time' => time(), 'count' => 1];
+            } else {
+                $attempts[$ip]['count']++;
+                $attempts[$ip]['time'] = time();
+            }
+        }
+    }
+
+    //write back
+    $lines = [];
+    foreach ($attempts as $stored_ip => $info) {
+        $lines[] = $stored_ip . '|' . date('Y-m-d H:i:s', $info['time']) . '|' . $info['count'];
+    }
+    file_put_contents($attempts_file, implode("\n", $lines));
 }
 
 $configuration = array(
@@ -43,7 +106,10 @@ $configuration = array(
     '{LOGIN_LOGOUT_URL}'  => '/?page=login',
     '{METHOD}'            => 'POST', // cambiat per POST perque no es vegin els paràmetres a l'URL i a la consola
     '{REGISTER_URL}'      => '/?page=register',
-    '{SITE_NAME}'         => 'La meva pàgina'
+    '{SITE_NAME}'         => 'La meva pàgina',
+    '{BLOCK_MESSAGE}'     => '',
+    '{BLOCKED}'           => '',
+    '{BLOCK_TIME_LEFT}'   => '0'
 );
 
 // agafem la pagin amb GET pero els parametres amb POST
@@ -59,10 +125,21 @@ if ($page) {
         //log
         write_log('page_view_register', '-');
     } else if ($page === 'login') {
-        $template = 'login';
-        $configuration['{LOGIN_USERNAME}'] = '';
-        //log
-        write_log('page_view_login', '-');
+        $ip = get_client_ip();
+        $blocked_time = check_attempts($ip);
+        if ($blocked_time > 0) {
+            $template = 'home';
+            $configuration['{BLOCKED}'] = 'true';
+            $configuration['{BLOCK_TIME_LEFT}'] = $blocked_time;
+            $configuration['{BLOCK_MESSAGE}'] = '<mark>Has superat el nombre maxim d\'intents. Pots tornar-ho a provar en <span id="countdown"></span> segons.</mark>';
+            //log
+            write_log('login_blocked_view', $ip);
+        } else {
+            $template = 'login';
+            $configuration['{LOGIN_USERNAME}'] = '';
+            //log
+            write_log('page_view_login', '-');
+        } 
     } else if ($page === 'logout') { //si abans teniem cookie i ho volem treure
         $username = $_SESSION['username'] ?? '-';
         write_log('logout', $username);
@@ -142,31 +219,61 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } else if (isset($_POST['login'])) {
         $username = trim((string)($_POST['user_name'] ?? '-'));
         $password = (string)($_POST['user_password'] ?? '-');
-        //log
-        write_log('login_attempt', $username);
+        $ip = get_client_ip();
+        $blocked_time = check_attempts($ip);
 
-        // validem dades
-        if ($username === '') {
-            $configuration['{FEEDBACK}'] = '<mark>ERROR: Es requereix nom d usuari</mark>';
+        if ($blocked_time > 0) {
+            $configuration['{FEEDBACK}'] = '<mark>ERROR: Massa intents. Espera uns minuts</mark>';
             //log
-            write_log('login_fail', $username);
-        } else { //comprovem el password
-            try {
-                $db = new PDO($db_connection);
-                $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-                $sql = 'SELECT * FROM users WHERE user_name = :user_name';
-                $query = $db->prepare($sql);
-                $query->bindValue(':user_name', $username);
-                $query->execute();
-                //$result_row = $query->fetchObject();
-                $row = $query->fetch(PDO::FETCH_ASSOC);
-                if ($row) {
-                    $stored = $row['user_password'];
-                    // s'assumeix que tots passwords que tenim en la bd son hashejats
-                    
-                    if (password_verify($password, $stored)) {
-                        //mirem si cal fer un rehash
-                        if (password_needs_rehash($stored, PASSWORD_BCRYPT)) {
+            write_log('login_blocked', $username);
+        } else {
+            //log
+            write_log('login_attempt', $username);
+
+            // validem dades
+            if ($username === '') {
+                $configuration['{FEEDBACK}'] = '<mark>ERROR: Es requereix nom d usuari</mark>';
+                //log
+                write_log('login_fail', $username);
+                register_attempt($ip, false);
+            } else { //comprovem el password
+                try {
+                    $db = new PDO($db_connection);
+                    $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+                    $sql = 'SELECT * FROM users WHERE user_name = :user_name';
+                    $query = $db->prepare($sql);
+                    $query->bindValue(':user_name', $username);
+                    $query->execute();
+                    //$result_row = $query->fetchObject();
+                    $row = $query->fetch(PDO::FETCH_ASSOC);
+                    if ($row) {
+                        $stored = $row['user_password'];
+                        // s'assumeix que tots passwords que tenim en la bd son hashejats
+                        
+                        if (password_verify($password, $stored)) {
+                            //mirem si cal fer un rehash
+                            if (password_needs_rehash($stored, PASSWORD_BCRYPT)) {
+                                $newHash = password_hash($password, PASSWORD_BCRYPT);
+                                if ($newHash !== false) { //canviem password en la bd
+                                    $upd = $db->prepare('UPDATE users SET user_password = :hash WHERE user_id = :id');
+                                    $upd->bindValue(':hash', $newHash);
+                                    $upd->bindValue(':id', $row['user_id']);
+                                    $upd->execute();
+                                    //log
+                                    write_log('password_rehash', $username);
+                                }
+                            }
+
+                            $_SESSION['user_id'] = $row['user_id'];
+                            $_SESSION['username'] = $username;
+
+                            $configuration['{FEEDBACK}'] = '"Sessió" iniciada com <b>' . htmlentities($username) . '</b>';
+                            //$configuration['{LOGIN_LOGOUT_TEXT}'] = 'Tancar "sessió"';
+                            //$configuration['{LOGIN_LOGOUT_URL}'] = '/?page=logout';
+                            //log
+                            write_log('login_success', $username);
+                            register_attempt($ip, true);
+                        } else if ($password === $stored) {
                             $newHash = password_hash($password, PASSWORD_BCRYPT);
                             if ($newHash !== false) { //canviem password en la bd
                                 $upd = $db->prepare('UPDATE users SET user_password = :hash WHERE user_id = :id');
@@ -174,53 +281,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 $upd->bindValue(':id', $row['user_id']);
                                 $upd->execute();
                                 //log
-                                write_log('password_rehash', $username);
+                                write_log('password_migrate', $username);
                             }
-                        }
+                            
+                            $_SESSION['user_id'] = $row['user_id'];
+                            $_SESSION['username'] = $username;
 
-                        $_SESSION['user_id'] = $row['user_id'];
-                        $_SESSION['username'] = $username;
-
-                        $configuration['{FEEDBACK}'] = '"Sessió" iniciada com <b>' . htmlentities($username) . '</b>';
-                        //$configuration['{LOGIN_LOGOUT_TEXT}'] = 'Tancar "sessió"';
-                        //$configuration['{LOGIN_LOGOUT_URL}'] = '/?page=logout';
-                        //log
-                        write_log('login_success', $username);
-                    } else if ($password === $stored) {
-                        $newHash = password_hash($password, PASSWORD_BCRYPT);
-                        if ($newHash !== false) { //canviem password en la bd
-                            $upd = $db->prepare('UPDATE users SET user_password = :hash WHERE user_id = :id');
-                            $upd->bindValue(':hash', $newHash);
-                            $upd->bindValue(':id', $row['user_id']);
-                            $upd->execute();
+                            $configuration['{FEEDBACK}'] = '"Sessió" iniciada com <b>' . htmlentities($username) . '</b>';
+                            //$configuration['{LOGIN_LOGOUT_TEXT}'] = 'Tancar "sessió"';
+                            //$configuration['{LOGIN_LOGOUT_URL}'] = '/?page=logout';
                             //log
-                            write_log('password_migrate', $username);
+                            write_log('login_success', $username);
+                            register_attempt($ip, true);
+                        } else {
+                            $configuration['{FEEDBACK}'] = '<mark>ERROR: Usuari desconegut o contrasenya incorrecta</mark>';
+                            //log
+                            write_log('login_fail', $username);
+                            register_attempt($ip, false);
                         }
-                        
-                        $_SESSION['user_id'] = $row['user_id'];
-                        $_SESSION['username'] = $username;
-
-                        $configuration['{FEEDBACK}'] = '"Sessió" iniciada com <b>' . htmlentities($username) . '</b>';
-                        //$configuration['{LOGIN_LOGOUT_TEXT}'] = 'Tancar "sessió"';
-                        //$configuration['{LOGIN_LOGOUT_URL}'] = '/?page=logout';
-                        //log
-                        write_log('login_success', $username);
                     } else {
                         $configuration['{FEEDBACK}'] = '<mark>ERROR: Usuari desconegut o contrasenya incorrecta</mark>';
                         //log
                         write_log('login_fail', $username);
+                        register_attempt($ip, false);
                     }
-                } else {
-                    $configuration['{FEEDBACK}'] = '<mark>ERROR: Usuari desconegut o contrasenya incorrecta</mark>';
+                } catch (PDOException $e) {
+                    $configuration['{FEEDBACK}'] = '<mark>ERROR: Error de base de dades</mark>';
                     //log
                     write_log('login_fail', $username);
+                    register_attempt($ip, false);
                 }
-            } catch (PDOException $e) {
-                $configuration['{FEEDBACK}'] = '<mark>ERROR: Error de base de dades</mark>';
-                //log
-                write_log('login_fail', $username);
             }
         }
+        
     }
 }
 
@@ -235,4 +328,22 @@ if (!empty($_SESSION['username'])) {
 // process template and show output
 $html = file_get_contents('plantilla_' . $template . '.html', true);
 $html = str_replace(array_keys($configuration), array_values($configuration), $html);
+
+if ($configuration['{BLOCKED}'] === 'true') {
+    $html .= "
+    <script>
+    let remaining = {$configuration['{BLOCK_TIME_LEFT}']};
+    function updateCountdown() {
+        if (remaining <= 0) {
+            location.href='/?page=login';
+        } else {
+            document.getElementById('countdown').innerText = remaining;
+            remaining--;
+            setTimeout(updateCountdown, 1000);
+        }
+    }
+    updateCountdown();
+    </script>";
+}
+
 echo $html;
