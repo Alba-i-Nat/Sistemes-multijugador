@@ -1,1 +1,22 @@
 ﻿/* Afegeix aquí les teves regles d'estil */
+.password-wrapper {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+.password-wrapper input {
+    width: 100%;
+    padding-right: 2em;
+    box-sizing: border-box;
+}
+
+.password-wrapper .toggle-eye {
+    position: absolute;
+    right: 0.5em;
+    bottom: 1.3em;
+    cursor: pointer;
+    user-select: none;
+    color:rgb(150, 150, 150);
+    font-weight: bolder;
+}

@@ -28,9 +28,13 @@
                     <h2>Inici de sessió</h2>
                 </header>
                 <label for="login_username">Nom d'usuari</label>
-                <input id="login_username" type="text" name="user_name" value="{LOGIN_USERNAME}" />
+                <input id="login_username" type="text" name="user_name" value="{LOGIN_USERNAME}" required maxlength="48" />
                 <label for="login_password">Contrasenya</label>
-                <input id="login_password" type="password" name="user_password" />
+                <div class="password-wrapper">
+                    <input id="login_password" type="password" name="user_password" required maxlength="48" />
+                    <span id="toggle_login_pw" class="toggle-eye">⬤</span>
+                </div>
+                
                 <input type="submit" name="login" value="Iniciar sessió" />
             </form>
         </section>

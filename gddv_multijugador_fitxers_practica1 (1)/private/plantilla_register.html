@@ -28,10 +28,18 @@
                     <h2>Crea un nou compte</h2>
                 </header>
                 <label for="register_username">Nom d'usuari</label>
-                <input id="register_username" type="text" name="user_name" value="{REGISTER_USERNAME}" />
+                <input id="register_username" type="text" name="user_name" value="{REGISTER_USERNAME}"  required maxlength="48"/>
                 <label for="register_password">Contrasenya</label>
-                <input id="register_password" type="password" name="user_password" />
+                <div class="password-wrapper">
+                    <input id="register_password" type="password" name="user_password" required minlength="8" maxlength="48" />
+                    <span id="toggle_register_pw" class="toggle-eye">⬤</span>
+                </div>
+                
+                <div>
+                    <small>La contrasenya ha de tenir entre 8 i 48 caracters.</small>
+                </div>
                 <input type="submit" name="register" value="Crear compte" />
+                
             </form>
         </section>
         <section>
