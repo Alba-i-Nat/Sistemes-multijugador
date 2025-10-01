@@ -1,5 +1,12 @@
 <?php
 
+//iniciem sessio segura
+session_start([
+    'cookie_httponly' => true,
+    'cookie_samesite' => 'Strict'
+    //'cookie_secure' => true, //si despres utilitzarem https
+]);
+
 // defaults
 $template = 'home';
 $db_connection = 'sqlite:..\private\users.db';
@@ -15,7 +22,6 @@ define('USERNAME_MAX_LEN', 48);
 
 
 // funcions
-
 function write_log($action, $username = '-'){
     global $log_file;
     // mirem si existeix el fitxer log, sino creem
@@ -57,6 +63,19 @@ if ($page) {
         $configuration['{LOGIN_USERNAME}'] = '';
         //log
         write_log('page_view_login', '-');
+    } else if ($page === 'logout') { //si abans teniem cookie i ho volem treure
+        $username = $_SESSION['username'] ?? '-';
+        write_log('logout', $username);
+
+        $_SESSION = [];
+        if (ini_get("session.use_cookies")) {
+            $params = session_get_cookie_params();
+            setcookie(session_name(), '', time() - 42000, $params["path"], $params["domain"], $params["secure"], $params["httponly"]);
+        }
+        session_destroy();
+
+        header("Location: /");
+        exit;
     }
 }
 
@@ -159,9 +178,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             }
                         }
 
+                        $_SESSION['user_id'] = $row['user_id'];
+                        $_SESSION['username'] = $username;
+
                         $configuration['{FEEDBACK}'] = '"Sessió" iniciada com <b>' . htmlentities($username) . '</b>';
-                        $configuration['{LOGIN_LOGOUT_TEXT}'] = 'Tancar "sessió"';
-                        $configuration['{LOGIN_LOGOUT_URL}'] = '/?page=logout';
+                        //$configuration['{LOGIN_LOGOUT_TEXT}'] = 'Tancar "sessió"';
+                        //$configuration['{LOGIN_LOGOUT_URL}'] = '/?page=logout';
                         //log
                         write_log('login_success', $username);
                     } else if ($password === $stored) {
@@ -175,9 +197,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             write_log('password_migrate', $username);
                         }
                         
+                        $_SESSION['user_id'] = $row['user_id'];
+                        $_SESSION['username'] = $username;
+
                         $configuration['{FEEDBACK}'] = '"Sessió" iniciada com <b>' . htmlentities($username) . '</b>';
-                        $configuration['{LOGIN_LOGOUT_TEXT}'] = 'Tancar "sessió"';
-                        $configuration['{LOGIN_LOGOUT_URL}'] = '/?page=logout';
+                        //$configuration['{LOGIN_LOGOUT_TEXT}'] = 'Tancar "sessió"';
+                        //$configuration['{LOGIN_LOGOUT_URL}'] = '/?page=logout';
                         //log
                         write_log('login_success', $username);
                     } else {
@@ -198,6 +223,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 }
+
+if (!empty($_SESSION['username'])) {
+    $configuration['{LOGIN_LOGOUT_TEXT}'] = 'Tancar sessió';
+    $configuration['{LOGIN_LOGOUT_URL}']  = '/?page=logout';
+} else {
+    $configuration['{LOGIN_LOGOUT_TEXT}'] = 'Identificar-me';
+    $configuration['{LOGIN_LOGOUT_URL}']  = '/?page=login';
+}
+
 // process template and show output
 $html = file_get_contents('plantilla_' . $template . '.html', true);
 $html = str_replace(array_keys($configuration), array_values($configuration), $html);
