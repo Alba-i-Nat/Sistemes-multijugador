@@ -21,21 +21,22 @@
         <header>
             <h1><a href="/">{SITE_NAME}</a></h1>
             <div>{FEEDBACK}</div>
+            <div>{BLOCK_MESSAGE}</div>
         </header>
-        <section>
+        <section id="login_section">
             <form method="{METHOD}" action="{LOGIN_LOGOUT_URL}">
                 <header>
                     <h2>Inici de sessió</h2>
                 </header>
                 <label for="login_username">Nom d'usuari</label>
-                <input id="login_username" type="text" name="user_name" value="{LOGIN_USERNAME}" required maxlength="48" />
+                <input id="login_username" type="text" name="user_name" value="{LOGIN_USERNAME}" required maxlength="48" {BLOCKED}/>
                 <label for="login_password">Contrasenya</label>
                 <div class="password-wrapper">
-                    <input id="login_password" type="password" name="user_password" required maxlength="48" />
+                    <input id="login_password" type="password" name="user_password" required maxlength="48" {BLOCKED}/>
                     <span id="toggle_login_pw" class="toggle-eye">⬤</span>
                 </div>
                 
-                <input type="submit" name="login" value="Iniciar sessió" />
+                <input type="submit" name="login" value="Iniciar sessió" {BLOCKED}/>
             </form>
         </section>
         <section>

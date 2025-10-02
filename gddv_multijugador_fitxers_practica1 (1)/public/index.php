@@ -14,6 +14,7 @@ $db_connection = 'sqlite:..\private\users.db';
 // fitxer log, per ara no esborrem res
 $log_file = __DIR__ . '/../private/log.txt';
 $attempts_file = __DIR__ . '/../private/attempts.txt';
+$register_attempts_file = __DIR__ . '/../private/register_attempts.txt';
 date_default_timezone_set('Europe/Madrid');
 
 // regles de password i usernames
@@ -22,7 +23,8 @@ define('PASSWORD_MAX_LEN', 48);
 define('USERNAME_MAX_LEN', 48);
 define('MAX_ATTEMPTS', 3);
 define('BLOCK_TIME', 90); // 15 minutes
-
+define('MAX_REG_ATTEMPTS', 3);
+define('REG_BLOCK_TIME', 60); // 10 minutes
 
 // funcions
 function write_log($action, $username = '-'){
@@ -100,6 +102,64 @@ function register_attempt($ip, $success) {
     file_put_contents($attempts_file, implode("\n", $lines));
 }
 
+
+function check_register_attempts($ip) {
+    global $register_attempts_file;
+    $attempts = [];
+
+    if (file_exists($register_attempts_file)) {
+        $lines = file($register_attempts_file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        foreach ($lines as $line) {
+            [$stored_ip, $time, $count] = explode('|', $line);
+            $attempts[$stored_ip] = ['time' => strtotime($time), 'count' => (int)$count];
+        }
+    }
+
+    if (isset($attempts[$ip])) {
+        $diff = time() - $attempts[$ip]['time'];
+        if ($attempts[$ip]['count'] >= MAX_REG_ATTEMPTS && $diff < REG_BLOCK_TIME) {
+            return REG_BLOCK_TIME - $diff; // seconds left
+        }
+    }
+    return 0;
+}
+
+function register_register_attempt($ip, $success) {
+    global $register_attempts_file;
+    $attempts = [];
+
+    if (file_exists($register_attempts_file)) {
+        $lines = file($register_attempts_file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        foreach ($lines as $line) {
+            [$stored_ip, $time, $count] = explode('|', $line);
+            $attempts[$stored_ip] = ['time' => strtotime($time), 'count' => (int)$count];
+        }
+    }
+
+    if ($success) {
+        unset($attempts[$ip]); // reset if success
+    } else {
+        if (!isset($attempts[$ip])) {
+            $attempts[$ip] = ['time' => time(), 'count' => 1];
+        } else {
+            $diff = time() - $attempts[$ip]['time'];
+            if ($diff > REG_BLOCK_TIME) {
+                $attempts[$ip] = ['time' => time(), 'count' => 1];
+            } else {
+                $attempts[$ip]['count']++;
+                $attempts[$ip]['time'] = time();
+            }
+        }
+    }
+
+    // write back
+    $lines = [];
+    foreach ($attempts as $stored_ip => $info) {
+        $lines[] = $stored_ip . '|' . date('Y-m-d H:i:s', $info['time']) . '|' . $info['count'];
+    }
+    file_put_contents($register_attempts_file, implode("\n", $lines));
+}
+
 $configuration = array(
     '{FEEDBACK}'          => '',
     '{LOGIN_LOGOUT_TEXT}' => 'Identificar-me',
@@ -109,7 +169,10 @@ $configuration = array(
     '{SITE_NAME}'         => 'La meva pàgina',
     '{BLOCK_MESSAGE}'     => '',
     '{BLOCKED}'           => '',
-    '{BLOCK_TIME_LEFT}'   => '0'
+    '{BLOCK_TIME_LEFT}'   => '0',
+    '{REG_BLOCKED}'       => '',
+    '{REG_BLOCK_MESSAGE}' => '',
+    '{REG_BLOCK_TIME_LEFT}' => '0'
 );
 
 // agafem la pagin amb GET pero els parametres amb POST
@@ -119,24 +182,35 @@ $configuration = array(
 $page = $_GET['page'] ?? null;
 if ($page) {
     if ($page === 'register') {
+        $ip = get_client_ip();
+        $reg_block_time = check_register_attempts($ip);
         $template = 'register';
         $configuration['{REGISTER_USERNAME}'] = '';
-        $configuration['{LOGIN_LOGOUT_TEXT}'] = 'Ja tinc un compte';
-        //log
-        write_log('page_view_register', '-');
+        if ($reg_block_time > 0) {
+            $configuration['{REG_BLOCKED}'] = 'true';
+            $configuration['{REG_BLOCK_TIME_LEFT}'] = $reg_block_time;
+            $configuration['{REG_BLOCK_MESSAGE}'] = '<mark>Massa intents de registre. Pots tornar-ho a provar en <span id="reg_countdown"></span> segons</mark>';
+            write_log('register_blocked_view', $ip);
+        } else {
+            $configuration['{REG_BLOCKED}'] = '';
+            $configuration['{REG_BLOCK_MESSAGE}'] = '';
+            $configuration['{LOGIN_LOGOUT_TEXT}'] = 'Ja tinc un compte';
+            //log
+            write_log('page_view_register', '-');
+        }
     } else if ($page === 'login') {
         $ip = get_client_ip();
         $blocked_time = check_attempts($ip);
+        $template = 'login';
+        $configuration['{LOGIN_USERNAME}'] = '';
         if ($blocked_time > 0) {
-            $template = 'home';
             $configuration['{BLOCKED}'] = 'true';
             $configuration['{BLOCK_TIME_LEFT}'] = $blocked_time;
-            $configuration['{BLOCK_MESSAGE}'] = '<mark>Has superat el nombre maxim d\'intents. Pots tornar-ho a provar en <span id="countdown"></span> segons.</mark>';
-            //log
+            $configuration['{BLOCK_MESSAGE}'] = '<mark>Has superat el nombre maxim d intents. Pots tornar-ho a provar en <span id="countdown"></span> segons</mark>';
             write_log('login_blocked_view', $ip);
         } else {
-            $template = 'login';
-            $configuration['{LOGIN_USERNAME}'] = '';
+            $configuration['{BLOCKED}'] = '';
+            $configuration['{BLOCK_MESSAGE}'] = '';
             //log
             write_log('page_view_login', '-');
         } 
@@ -159,61 +233,72 @@ if ($page) {
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // registracio
     if (isset($_POST['register'])) {
-        $username = trim((string)($_POST['user_name'] ?? '-'));
-        $password = (string)($_POST['user_password'] ?? '-');
-        //log
-        write_log('register_attempt', $username);
+        $ip = get_client_ip();
+        $blocked_time = check_register_attempts($ip);
+        if ($blocked_time > 0) {
+            write_log('register_blocked', $ip);
+        } else {
+            $username = trim((string)($_POST['user_name'] ?? '-'));
+            $password = (string)($_POST['user_password'] ?? '-');
+            //log
+            write_log('register_attempt', $username);
 
-        // validem dades per part del server
-        if ($username === '') {
-            $configuration['{FEEDBACK}'] = '<mark>ERROR: Es requereix nom d usuari</mark>';
-            //log
-            write_log('register_fail', $username);
-        } else if (strlen($username) > USERNAME_MAX_LEN) {
-            $configuration['{FEEDBACK}'] = '<mark>ERROR: Nom d usuari no pot eccedir 48 caracters</mark>';
-            //log
-            write_log('register_fail', $username);
-        } else if (strlen($password) > PASSWORD_MAX_LEN) {
-            $configuration['{FEEDBACK}'] = '<mark>ERROR: Password ha de ser com a minim de 8 caracters</mark>';
-            //log
-            write_log('register_fail', $username);
-        } else { //si no hi han errors
-            //fem hash per passwords amb bcrypt
-            $hash = password_hash($password, PASSWORD_BCRYPT);
-            if ($hash === false) {
-                $configuration['{FEEDBACK}'] = '<mark>ERROR: No em pogut hashejar el password</mark>';
+            // validem dades per part del server
+            if ($username === '') {
+                $configuration['{FEEDBACK}'] = '<mark>ERROR: Es requereix nom d usuari</mark>';
                 //log
                 write_log('register_fail', $username);
-            } else {
-                try {
-                    $db = new PDO($db_connection);
-                    $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-                    $sql = 'INSERT INTO users (user_name, user_password) VALUES (:user_name, :user_password)';
-                    $query = $db->prepare($sql);
-                    $query->bindValue(':user_name', $username);
-                    $query->bindValue(':user_password', $hash);
-                    $query->execute();
-
-                    $configuration['{FEEDBACK}'] = 'Creat el compte <b>' . htmlentities($username) . '</b>';
-                    $configuration['{LOGIN_LOGOUT_TEXT}'] = 'Tancar sessió';
+                register_register_attempt($ip, false);
+            } else if (strlen($username) > USERNAME_MAX_LEN) {
+                $configuration['{FEEDBACK}'] = '<mark>ERROR: Nom d usuari no pot eccedir 48 caracters</mark>';
+                //log
+                write_log('register_fail', $username);
+                register_register_attempt($ip, false);
+            } else if (strlen($password) > PASSWORD_MAX_LEN) {
+                $configuration['{FEEDBACK}'] = '<mark>ERROR: Password ha de ser com a minim de 8 caracters</mark>';
+                //log
+                write_log('register_fail', $username);
+            } else { //si no hi han errors
+                //fem hash per passwords amb bcrypt
+                $hash = password_hash($password, PASSWORD_BCRYPT);
+                if ($hash === false) {
+                    $configuration['{FEEDBACK}'] = '<mark>ERROR: No em pogut hashejar el password</mark>';
                     //log
-                    write_log('register_success', $username);
-                } catch (PDOException $e) {
-                    //control d'errors
-                    $code = $e->getCode();
-                    $msg = $e->getMessage();
-                    if ($code === '23000' or stripos($msg, 'UNIQUE') !== false) {
-                        $configuration['{FEEDBACK}'] = '<mark>ERROR: Nom d usuari no permitit</mark>';
+                    write_log('register_fail', $username);
+                } else {
+                    try {
+                        $db = new PDO($db_connection);
+                        $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+                        $sql = 'INSERT INTO users (user_name, user_password) VALUES (:user_name, :user_password)';
+                        $query = $db->prepare($sql);
+                        $query->bindValue(':user_name', $username);
+                        $query->bindValue(':user_password', $hash);
+                        $query->execute();
+
+                        $configuration['{FEEDBACK}'] = 'Creat el compte <b>' . htmlentities($username) . '</b>';
+                        $configuration['{LOGIN_LOGOUT_TEXT}'] = 'Tancar sessió';
                         //log
-                        write_log('register_fail', $username);
-                    } else {
-                        $configuration['{FEEDBACK}'] = '<mark>ERROR: Error de base de dades</mark>';
-                        //log
-                        write_log('register_fail', $username);
+                        write_log('register_success', $username);
+                        register_register_attempt($ip, true);
+                    } catch (PDOException $e) {
+                        //control d'errors
+                        $code = $e->getCode();
+                        $msg = $e->getMessage();
+                        if ($code === '23000' or stripos($msg, 'UNIQUE') !== false) {
+                            $configuration['{FEEDBACK}'] = '<mark>ERROR: Nom d usuari no permitit</mark>';
+                            //log
+                            write_log('register_fail', $username);
+                            register_register_attempt($ip, false);
+                        } else {
+                            $configuration['{FEEDBACK}'] = '<mark>ERROR: Error de base de dades</mark>';
+                            //log
+                            write_log('register_fail', $username);
+                        }
                     }
                 }
             }
         }
+        
         
     // login
     } else if (isset($_POST['login'])) {
@@ -223,7 +308,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $blocked_time = check_attempts($ip);
 
         if ($blocked_time > 0) {
-            $configuration['{FEEDBACK}'] = '<mark>ERROR: Massa intents. Espera uns minuts</mark>';
             //log
             write_log('login_blocked', $username);
         } else {
@@ -325,10 +409,17 @@ if (!empty($_SESSION['username'])) {
     $configuration['{LOGIN_LOGOUT_URL}']  = '/?page=login';
 }
 
+$configuration['{BLOCKED}'] = ($configuration['{BLOCKED}'] === 'true') ? 'disabled' : '';
+$configuration['{BLOCK_MESSAGE}'] = $configuration['{BLOCK_MESSAGE}'] ?? '';
+
+$configuration['{REG_BLOCKED}'] = ($configuration['{REG_BLOCKED}'] === 'true') ? 'disabled' : '';
+$configuration['{REG_BLOCK_MESSAGE}'] = $configuration['{REG_BLOCK_MESSAGE}'] ?? '';
+
 // process template and show output
 $html = file_get_contents('plantilla_' . $template . '.html', true);
 $html = str_replace(array_keys($configuration), array_values($configuration), $html);
 
+//login timeout
 if ($configuration['{BLOCKED}'] === 'true') {
     $html .= "
     <script>
@@ -343,6 +434,24 @@ if ($configuration['{BLOCKED}'] === 'true') {
         }
     }
     updateCountdown();
+    </script>";
+}
+
+//registracio timeout
+if ($configuration['{REG_BLOCKED}'] === 'true') {
+    $html .= "
+    <script>
+    let regRemaining = {$configuration['{REG_BLOCK_TIME_LEFT}']};
+    function updateRegCountdown() {
+        if (regRemaining <= 0) {
+            location.href='/?page=register';
+        } else {
+            document.getElementById('reg_countdown').innerText = regRemaining;
+            regRemaining--;
+            setTimeout(updateRegCountdown, 1000);
+        }
+    }
+    updateRegCountdown();
     </script>";
 }
 
